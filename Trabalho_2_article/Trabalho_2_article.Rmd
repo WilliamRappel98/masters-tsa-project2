@@ -1,0 +1,261 @@
+---
+title: "Forecasting brazilian consumer price index monthly variation using ARIMA and ETS models"
+short_title: "Forecasting brazilian inflation using ARIMA and ETS models"
+short_author: "William Edward Rappel de Amorim"
+authors: 
+- name: "William Edward Rappel de Amorim"
+  affiliation: "University of Brasilia"
+  city: "Brasilia-DF"
+  country: "Brazil"
+  email: "william_rappel\\@hotmail.com"
+abstract: |
+  Inflation forecasting is an extremely important task, as it can help economic agents make decisions. The aim of this study was to use ARIMA and ETS models to forecast monthly variation in the IPCA, the main inflation index used in Brazil. The ARIMA model presented residuals with satisfactory behavior, whereas the ETS presented non-independence. However, both showed very low predictive performance.
+keywords: Time series, Forecasting, Time series forecasting, State Space Models, Inflation, IPCA, CPI, ARIMA, ETS, Statistics, Predictive modelling.
+bibliography: "bibliography"
+output: rticles::rss_article
+---
+
+```{r setup, results=FALSE, message=FALSE, echo=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo=F, warning=F, message=F)
+
+### Packages
+if (!require('pacman')) install.packages('pacman')
+pacman::p_load(tidyverse, forecast, tseries, cowplot, knitr, kableExtra)
+
+### Functions
+source('../utils.R')
+
+### Reproducibility
+set.seed(10)
+```
+
+```{r data, include=FALSE}
+### Data
+df <- read_csv('../data/IPCA.csv')
+df$Date[1]
+df$Date[nrow(df)-12]
+df$Date[nrow(df)-11]
+df$Date[nrow(df)]
+x  <- ts(df$IPCA, frequency=12, start=c(2008, 1), end=c(2021, 12))
+xx <- ts(df$IPCA, frequency=12, start=c(2022, 1), end=c(2022, 12))
+```
+
+# Introduction
+
+The Brazilian consumer price index, known in Brazil as the IPCA, is the most widely used index to measure economic inflation for the Brazilian consumer. It is used as a readjustment indicator for several contracts and is an important economic indicator, with a great impact on the decision-making process of economic agents, both public and private. Thus, making accurate predictions of this indicator is extremely important for better planning and defining each agent's strategy.
+
+In this article, the object of study was the time series of the monthly variation of the IPCA, presented by the Central Bank of Brazil, available at https://www3.bcb.gov.br/sgspub/localizarseries/localizarSeries.do?method=prepararTelaLocalizarSeries. It was decided to use only the last 15 years of this series, that is, starting in January 2008. Then, ARIMA and ETS models were estimated. After that, it was conducted residual analysis, followed by an study of the predictive performance via sliding window technique. Finally, point and interval predictions were obtained and evaluated in a test set.
+
+The series has a monthly frequency and 15 years of observations, totaling 180 values. It was divided into train and test datasets, with the training period from 2008 to 2021 and the testing period is the year of 2022. Figure 1 presents the observed values of the time series in the training period. It appears to be stationary, but the mean of the series is greater than 0.
+
+```{r ipca-plot, fig.cap='Monthly variation of the IPCA.', out.height='40%', fig.align='center'}
+### Time series plot
+x %>%
+  autoplot() +
+  labs(x='Year', y='IPCA (Monthly Var.)') +
+  scale_x_continuous(breaks=scales::extended_breaks(15)) +
+  scale_y_continuous(labels=function(x) paste0(x, '%')) +
+  theme_bw()
+```
+
+# Decomposition
+
+The STL decomposition was applied to the training series, via `mstl` function from the `forecast` R package. This R package was proposed by @forecast. Results are shown in Figure 2. It is not possible to identify a very intense trend or seasonal pattern.
+
+```{r mstl, fig.cap='STL decomposition of the training series.', out.height='40%', fig.align='center'}
+### Time series plot
+x %>%
+  mstl() %>%
+  autoplot() +
+  labs(x='Year') +
+  scale_x_continuous(breaks=scales::extended_breaks(15)) +
+  scale_y_continuous(labels=function(x) paste0(x, '%')) +
+  theme_bw()
+```
+
+# Model selection
+
+In this article, the ARIMA and ETS model classes were considered. In addition, Box-Cox transformations were not used, since the level of variation in the series appears to be constant.
+
+## ARIMA
+
+ARIMA models are described at @morettin2006. Via `ndiffs` and `nsdiffs` function from the `forecast` R package, it is obtained that differentiations are not necessary, as the series is already stationary (Figure 1), a hypothesis confirmed by the Augmented Dickey Fuller test (p-value = 0.01). From Figure 1, it can be seen that the mean of the series is greater than 0, a fact that will be considered in the training of the ARIMA models. Next, in order to select the parameters $p$, $q$, $P$ and $Q$, the ACF and PACF are presented in Figure 3.
+
+```{r diffs, include=FALSE}
+### ARIMA model
+# Diffs
+ndiffs(x)
+nsdiffs(x)
+adf.test(x)
+```
+
+```{r acf-pacf, fig.cap='ACF and PACF plots.', out.height='40%', fig.align='center'}
+# ACF and PACF
+acf <- x %>%
+  ggAcf(lag.max=12*3) +
+  labs(title='') +
+  theme_bw()
+pacf <- x %>%
+  ggPacf(lag.max=12*3) +
+  labs(title='') +
+  theme_bw()
+plot_grid(acf, pacf, nrow=1)
+```
+
+When analyzing the non-seasonal lags, the ACF converges to zero without breaks, while the PACF shows a break in the first lag. Therefore, the chosen candidate values are $p$ equals 1 and $q$ equals 0. For seasonal lags, the PACF is not significantly different from 0 at any lag and the ACF is significant only at lag 12. So $P$ will be fixed at 0 and $Q=0,1$. After training ARIMA models with all the combinations of parameters described earlier, the model with the lowest AICc is selected, which is the $SARIMA(1,0,0)(0,0,1)_{12}$ and AICc equals to 31.62.
+
+```{r arima-model, include=FALSE}
+# p = 1
+# q = 0
+# P = 0
+# Q = 0, 1
+p <- 1
+q <- 0
+P <- 0
+Q <- 0:1
+best_aicc <- Inf
+for (pi in p) {
+  for (qi in q) {
+    for (Pi in P) {
+      for (Qi in Q) {
+        mod <- x %>% Arima(order=c(pi, 0, qi), seasonal=c(Pi, 0, Qi), include.mean=T, lambda=NULL)
+        if (mod$aicc < best_aicc) {
+          best_mod <- mod
+          best_aicc <- mod$aicc
+        }
+      }
+    }
+  }
+}
+(mod_arima <- best_mod)
+```
+
+```{r arima-residuals-plots, fig.cap='ARIMA residuals plots.', out.height='40%', fig.align='center'}
+# Residuals plots
+residuals_plots(mod_arima)
+```
+
+```{r arima-residuals-tests, include=FALSE}
+# Residuals tests
+residuals_tests(mod_arima)
+```
+
+From Figure 4 and Shapiro-Wilk and Ljung-Box tests, it is concluded that the residuals appear to be stationary, normally distributed (p-value = 0.18) and independent (p-value = 0.39).
+
+## ETS
+
+ETS models are described at @hyndman2008. As the series does not have a seasonal pattern, only ETS models without a seasonal component will be considered. The best model will be defined using the `ets` function from the `forecast` R package, which trains several ETS models and selects the one with the lowest value for the AICc. After applying this procedure, the model selected is ETS(A,N,N), which corresponds to the SES model and has AICc equals to 440.21.
+
+```{r ets-model, include=FALSE}
+### ETS model
+(mod_ets <- ets(x, model='ZZN'))
+```
+
+```{r ets-residuals-plots, fig.cap='ETS residuals plots.', out.height='40%', fig.align='center'}
+# Residuals plots
+residuals_plots(mod_ets)
+```
+
+```{r ets-residuals-tests, include=FALSE}
+# Residuals tests
+residuals_tests(mod_ets)
+```
+
+From Figure 5 and Shapiro-Wilk and Ljung-Box tests, it is concluded that the residuals appear to be stationary, normally distributed (p-value = 0.14), but not independent (p-value < 0.01).
+
+# Predictive performance analysis
+
+Using only the training dataset, the predictive performance of the selected ARIMA and ETS models was evaluated via sliding window, starting at the 13th month of observation and considering predictions of up to 12 steps ahead.
+
+```{r sliding-window-eval, include=FALSE}
+### Sliding window validation
+CV_arima <- x %>% tsCV(forecastfunction=func_arima, h=12, initial=13)
+CV_ets <- x %>% tsCV(forecastfunction=func_ets, h=12, initial=13)
+MAE_arima <- CV_arima %>% abs() %>% colMeans(na.rm=T)
+MAE_ets <- CV_ets %>% abs() %>% colMeans(na.rm=T)
+```
+
+```{r sliding-window-table}
+tab <- cbind(MAE_arima, MAE_ets)
+tab %>%
+  kable(
+    col.names=c('ARIMA', 'ETS'),
+    caption='MAE by horizon.',
+    digits=3,
+    format.args=list(decimal.mark='.', scientific=F),
+    align='c',
+    booktabs=T
+  )
+```
+
+```{r sliding-window-plot, fig.cap='MAE by forecasting horizon.', out.height='40%', fig.align='center'}
+tab_plot <- tab %>%
+  as.data.frame() %>%
+  mutate(Horizon=1:12) %>%
+  gather(key='Model', value='MAE', -Horizon)
+tab_plot %>%
+  ggplot(aes(x=Horizon, y=MAE)) +
+  geom_line(aes(color=Model)) + 
+  scale_x_continuous(breaks=scales::extended_breaks(12)) +
+  scale_color_manual(
+    values=c('black', 'red'),
+    breaks=c('MAE_arima', 'MAE_ets'),
+    labels=c('ARIMA', 'ETS')
+  ) +
+  theme_bw()
+```
+
+From Figure 6, the most accurate model in all forecasting horizons considered is ARIMA. Then, point predictions for the test dataset were obtained using these 2 models and 9 more benchmarks available in the forecast package: `naive`, `meanf`, `holt`, `hw`, `auto.arima`, ` stlf`, `bats`, `tbats`, `thetaf`. In Table 2, the MAEs of each of the considered models are presented.
+
+```{r benchmark}
+### Forecast
+# Benchmark comparison
+h <- 12
+preds <- list(
+  'ARIMA' = forecast(mod_arima, h=h),
+  'ETS' = forecast(mod_ets, h=h),
+  'naive' = naive(x, h=h),
+  'meanf' = meanf(x, h=h),
+  'holt' = holt(x, h=h),
+  'hw' = hw(x, h=h),
+  'auto.arima' = forecast(auto.arima(x), h=h),
+  'sltf' = stlf(x, h=h),
+  'bats' = forecast(bats(x), h=h),
+  'tbats' = forecast(tbats(x), h=h),
+  'thetaf' = forecast(thetaf(x), h=h)
+)
+mae <- unlist(lapply(preds, function(m) return(mean(abs(xx - m$mean)))))
+final <- data.frame(MAE=mae)
+final %>%
+  kable(
+    caption='MAE on test.',
+    digits=3,
+    format.args=list(decimal.mark='.', scientific=F),
+    align='c',
+    booktabs=T
+  )
+```
+
+Thus, the `meanf` benchmark, which uses the historical average as a point forecast, was the one that obtained the lowest MAE among all models considered. In Figure 7, point and interval forecasts are presented considering this model.
+
+```{r preds-plot, fig.cap='Point and interval prediction using meanf.', out.height='40%', fig.align='center'}
+# plot
+vec <- c('meanf', 'Observed')
+cores <- c('#0000AA', 'red')
+names(cores) <- vec
+preds <- meanf(x, h=h, level=95)
+x %>%
+  autoplot() + xlab('Year') + ylab('IPCA (Monthly Var.)') + theme_bw() +
+  autolayer(preds, series='meanf') +
+  autolayer(xx, series='Observed') +
+  scale_x_continuous(breaks=scales::extended_breaks(10)) +
+  scale_y_continuous(labels=function(x) paste0(x, '%')) +
+  scale_colour_manual(
+      values=cores,
+      breaks=vec,
+      name='')
+```
+
+# Conclusion
+
+In this article, after adjusting the ARIMA model to the IPCA monthly variation series, the residuals presented all the desired characteristics. As for the ETS model, the residuals are not independent. However, both models have very low predictive performance, being surpassed by the simple benchmark of the historical average. Other studies are needed to increase the predictive performance through the inclusion of explanatory variables and adjustments of dynamic regression models.
